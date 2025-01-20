@@ -107,6 +107,14 @@ interface HolderData {
   [address: string]: number;
 }
 
+declare global {
+  interface Window {
+    _env_: {
+      REACT_APP_BLOCKFROST_API_KEY: string;
+    }
+  }
+}
+
 function App() {
   const [policyId, setPolicyId] = useState('');
   const [holders, setHolders] = useState<TokenHolder[]>([]);
