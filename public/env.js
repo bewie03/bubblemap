@@ -1,3 +1,3 @@
 window._env_ = {
-  BLOCKFROST_API_KEY: process.env.BLOCKFROST_API_KEY
+  BLOCKFROST_API_KEY: "__BLOCKFROST_API_KEY__"
 };
