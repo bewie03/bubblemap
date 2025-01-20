@@ -7,8 +7,8 @@ let envContent = fs.readFileSync(envPath, 'utf8');
 
 // Replace the placeholder with the actual environment variable
 envContent = envContent.replace(
-  '"__BLOCKFROST_API_KEY__"',
-  `"${process.env.BLOCKFROST_API_KEY || ''}"`
+  '"__REACT_APP_BLOCKFROST_API_KEY__"',
+  `"${process.env.REACT_APP_BLOCKFROST_API_KEY || ''}"`
 );
 
 // Write the modified content back to env.js

@@ -11,7 +11,7 @@ interface TokenHolder {
 declare global {
   interface Window {
     _env_: {
-      BLOCKFROST_API_KEY: string;
+      REACT_APP_BLOCKFROST_API_KEY: string;
     }
   }
 }
@@ -26,14 +26,16 @@ function App() {
     setLoading(true);
     setError('');
     try {
-      console.log('API Key being used:', window._env_?.BLOCKFROST_API_KEY ? 'Present' : 'Missing');
+      const apiKey = window._env_?.REACT_APP_BLOCKFROST_API_KEY || '';
+      console.log('API Key length:', apiKey.length);
+      console.log('API Key starts with:', apiKey.substring(0, 7) + '...');
       
       // Get all assets under this policy
       const assetsResponse = await fetch(
         `https://cardano-mainnet.blockfrost.io/api/v0/assets/policy/${policyId}`,
         {
           headers: {
-            'project_id': window._env_?.BLOCKFROST_API_KEY || '',
+            'project_id': apiKey,
           },
         }
       );
@@ -65,7 +67,7 @@ function App() {
         `https://cardano-mainnet.blockfrost.io/api/v0/assets/${assetId}/addresses`,
         {
           headers: {
-            'project_id': window._env_?.BLOCKFROST_API_KEY || '',
+            'project_id': apiKey,
           },
         }
       );
