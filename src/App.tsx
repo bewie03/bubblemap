@@ -26,6 +26,8 @@ function App() {
     setLoading(true);
     setError('');
     try {
+      console.log('API Key being used:', window._env_?.BLOCKFROST_API_KEY ? 'Present' : 'Missing');
+      
       // Get all assets under this policy
       const assetsResponse = await fetch(
         `https://cardano-mainnet.blockfrost.io/api/v0/assets/policy/${policyId}`,
@@ -37,11 +39,14 @@ function App() {
       );
 
       if (!assetsResponse.ok) {
+        console.log('Response status:', assetsResponse.status);
         if (assetsResponse.status === 404) {
           throw new Error('No assets found for this policy ID. Please check if the policy ID is correct.');
         }
         if (assetsResponse.status === 403) {
-          throw new Error('API key error. Please check your Blockfrost API key.');
+          const errorText = await assetsResponse.text();
+          console.log('Error response:', errorText);
+          throw new Error(`API key error (403 Forbidden). Please check your Blockfrost API key. Details: ${errorText}`);
         }
         throw new Error(`API error: ${assetsResponse.status}`);
       }
@@ -66,11 +71,14 @@ function App() {
       );
 
       if (!holdersResponse.ok) {
+        console.log('Response status:', holdersResponse.status);
         if (holdersResponse.status === 404) {
           throw new Error('No holder information found for this asset.');
         }
         if (holdersResponse.status === 403) {
-          throw new Error('API key error. Please check your Blockfrost API key.');
+          const errorText = await holdersResponse.text();
+          console.log('Error response:', errorText);
+          throw new Error(`API key error (403 Forbidden). Please check your Blockfrost API key. Details: ${errorText}`);
         }
         throw new Error(`API error: ${holdersResponse.status}`);
       }
