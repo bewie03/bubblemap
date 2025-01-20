@@ -20,8 +20,17 @@ type BubbleData = {
   relatedIds?: string[];
 };
 
-type SimulationNode = d3.SimulationNodeDatum & BubbleData;
-type SimulationLink = d3.SimulationLinkDatum<SimulationNode>;
+type SimulationNode = d3.SimulationNodeDatum & BubbleData & {
+  x?: number;
+  y?: number;
+  fx?: number | null;
+  fy?: number | null;
+};
+
+type SimulationLink = d3.SimulationLinkDatum<SimulationNode> & {
+  source: SimulationNode;
+  target: SimulationNode;
+};
 
 const BubbleMap: React.FC<BubbleMapProps> = ({ holders, totalSupply }) => {
   const svgRef = useRef<SVGSVGElement>(null);
@@ -46,8 +55,8 @@ const BubbleMap: React.FC<BubbleMapProps> = ({ holders, totalSupply }) => {
         node.relatedIds.forEach(targetId => {
           if (nodes.some(n => n.id === targetId)) {
             links.push({
-              source: node.id,
-              target: targetId
+              source: node,
+              target: nodes.find(n => n.id === targetId) as SimulationNode
             });
           }
         });

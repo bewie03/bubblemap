@@ -9,6 +9,7 @@ import {
   MenuItem, 
   FormControl, 
   InputLabel,
+  SelectChangeEvent,
   CircularProgress,
   Alert,
   ThemeProvider,
@@ -17,6 +18,8 @@ import {
   styled
 } from '@mui/material';
 import BubbleMap from './components/BubbleMap';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { debounce } from 'lodash';
 
 const darkTheme = createTheme({
   palette: {
@@ -115,6 +118,16 @@ interface HolderData {
   [address: string]: number;
 }
 
+interface AddressInfo {
+  stake_address: string;
+  address: string;
+}
+
+interface StakeAddressCache {
+  stakeAddress: string;
+  addresses: Set<string>;
+}
+
 declare global {
   interface Window {
     _env_: {
@@ -122,6 +135,75 @@ declare global {
     }
   }
 }
+
+// Cache duration in milliseconds
+const CACHE_TIME = 1000 * 60 * 5; // 5 minutes
+
+// Rate limiting constants based on Blockfrost docs
+const REQUESTS_PER_SECOND = 10;
+const BURST_LIMIT = 500;
+const REQUEST_INTERVAL = 1000 / REQUESTS_PER_SECOND; // 100ms between requests
+const BATCH_SIZE = 8; // Reduced from 20 to stay well within rate limits
+
+// Improved rate limiter with token bucket algorithm
+class RateLimiter {
+  private tokens: number = BURST_LIMIT;
+  private lastRefill: number = Date.now();
+  private queue: Array<() => Promise<any>> = [];
+  private processing: boolean = false;
+
+  async schedule<T>(fn: () => Promise<T>): Promise<T> {
+    return new Promise((resolve, reject) => {
+      this.queue.push(async () => {
+        try {
+          const result = await fn();
+          resolve(result);
+        } catch (error) {
+          reject(error);
+        }
+      });
+      
+      if (!this.processing) {
+        this.processQueue();
+      }
+    });
+  }
+
+  private async processQueue() {
+    if (this.queue.length === 0) {
+      this.processing = false;
+      return;
+    }
+
+    this.processing = true;
+    this.refillTokens();
+
+    if (this.tokens > 0) {
+      this.tokens--;
+      const fn = this.queue.shift();
+      if (fn) {
+        await fn();
+        setTimeout(() => this.processQueue(), REQUEST_INTERVAL);
+      }
+    } else {
+      // Wait for token refill
+      setTimeout(() => this.processQueue(), REQUEST_INTERVAL);
+    }
+  }
+
+  private refillTokens() {
+    const now = Date.now();
+    const timePassed = now - this.lastRefill;
+    const newTokens = Math.floor(timePassed / REQUEST_INTERVAL);
+    
+    if (newTokens > 0) {
+      this.tokens = Math.min(BURST_LIMIT, this.tokens + newTokens);
+      this.lastRefill = now;
+    }
+  }
+}
+
+const rateLimiter = new RateLimiter();
 
 function App() {
   const [policyId, setPolicyId] = useState('');
@@ -131,6 +213,25 @@ function App() {
   const [assets, setAssets] = useState<Asset[]>([]);
   const [selectedAsset, setSelectedAsset] = useState('');
   const [totalSupply, setTotalSupply] = useState<number>(0);
+  const queryClient = useQueryClient();
+
+  // Cached asset query
+  const { data: assetData, isLoading: assetsLoading } = useQuery({
+    queryKey: ['assets', policyId],
+    queryFn: () => fetchAssetsForPolicy(policyId, window._env_.REACT_APP_BLOCKFROST_API_KEY),
+    enabled: !!policyId,
+    staleTime: CACHE_TIME,
+    cacheTime: CACHE_TIME,
+  });
+
+  // Cached holders query
+  const { data: holdersData, isLoading: holdersLoading } = useQuery({
+    queryKey: ['holders', selectedAsset],
+    queryFn: () => selectedAsset ? fetchHoldersForAsset(selectedAsset, window._env_.REACT_APP_BLOCKFROST_API_KEY) : Promise.resolve([]),
+    enabled: !!selectedAsset,
+    staleTime: CACHE_TIME,
+    cacheTime: CACHE_TIME,
+  });
 
   const formatTokenAmount = (amount: string, decimals: number = 0): string => {
     const rawAmount = BigInt(amount);
@@ -251,56 +352,97 @@ function App() {
 
   const findRelatedWallets = async (holders: TokenHolder[], apiKey: string): Promise<TokenHolder[]> => {
     const relatedWallets = new Map<string, Set<string>>();
+    const stakeAddressMap = new Map<string, Set<string>>();
+    const batchSize = BATCH_SIZE;
 
-    // For each holder, check their transaction history to find related wallets
-    for (const holder of holders) {
-      try {
-        const response = await fetch(
-          `https://cardano-mainnet.blockfrost.io/api/v0/addresses/${holder.address}/transactions?order=desc&count=50`,
-          {
-            headers: {
-              'project_id': apiKey,
-            },
-          }
-        );
-
-        if (!response.ok) continue;
-
-        const transactions = await response.json();
-        const relatedAddresses = new Set<string>();
-
-        // For each transaction, check other addresses involved
-        for (const tx of transactions) {
-          const txResponse = await fetch(
-            `https://cardano-mainnet.blockfrost.io/api/v0/txs/${tx.tx_hash}/utxos`,
-            {
-              headers: {
-                'project_id': apiKey,
-              },
+    // First, get stake addresses for all holders
+    for (let i = 0; i < holders.length; i += batchSize) {
+      const batch = holders.slice(i, i + batchSize);
+      
+      await Promise.all(
+        batch.map(async (holder) => {
+          try {
+            const cacheKey = `stake-${holder.address}`;
+            const cached = queryClient.getQueryData([cacheKey]);
+            
+            if (cached) {
+              const { stakeAddress, addresses } = cached as StakeAddressCache;
+              stakeAddressMap.set(stakeAddress, addresses);
+              return;
             }
-          );
 
-          if (!txResponse.ok) continue;
+            const response = await rateLimiter.schedule(() =>
+              fetch(
+                `https://cardano-mainnet.blockfrost.io/api/v0/addresses/${holder.address}`,
+                {
+                  headers: {
+                    'project_id': apiKey,
+                  },
+                }
+              )
+            );
 
-          const txDetails = await txResponse.json();
-          
-          // Add addresses that frequently interact with this wallet
-          [...txDetails.inputs, ...txDetails.outputs]
-            .map(io => io.address)
-            .filter(address => 
-              address !== holder.address && 
-              holders.some(h => h.address === address)
-            )
-            .forEach(address => relatedAddresses.add(address));
-        }
+            if (!response.ok) return;
 
-        relatedWallets.set(holder.address, relatedAddresses);
-      } catch (error) {
-        console.error('Error finding related wallets:', error);
+            const addressInfo: AddressInfo = await response.json();
+            const stakeAddress = addressInfo.stake_address;
+            
+            if (stakeAddress) {
+              // Get all addresses under this stake address
+              const stakeResponse = await rateLimiter.schedule(() =>
+                fetch(
+                  `https://cardano-mainnet.blockfrost.io/api/v0/accounts/${stakeAddress}/addresses`,
+                  {
+                    headers: {
+                      'project_id': apiKey,
+                    },
+                  }
+                )
+              );
+
+              if (stakeResponse.ok) {
+                const addressList: { address: string }[] = await stakeResponse.json();
+                const addresses: Set<string> = new Set(addressList.map((a) => a.address));
+                
+                // Only include addresses that are in our holders list
+                const relevantAddresses: Set<string> = new Set(
+                  [...addresses].filter(addr => holders.some(h => h.address === addr))
+                );
+
+                if (relevantAddresses.size > 1) {
+                  stakeAddressMap.set(stakeAddress, relevantAddresses);
+                  
+                  // Cache the results
+                  queryClient.setQueryData([cacheKey], {
+                    stakeAddress,
+                    addresses: relevantAddresses
+                  });
+                }
+              }
+            }
+          } catch (error) {
+            console.error('Error finding related wallets:', error);
+          }
+        })
+      );
+      
+      // Add a small delay between batches
+      if (i + batchSize < holders.length) {
+        await new Promise(resolve => setTimeout(resolve, REQUEST_INTERVAL * batchSize));
       }
     }
 
-    // Add related addresses to holders
+    // Convert stake address groups to related wallets
+    stakeAddressMap.forEach((addresses) => {
+      addresses.forEach(address => {
+        const related = new Set(Array.from(addresses));
+        related.delete(address); // Remove self from related set
+        if (related.size > 0) {
+          relatedWallets.set(address, related);
+        }
+      });
+    });
+
     return holders.map(holder => ({
       ...holder,
       relatedAddresses: Array.from(relatedWallets.get(holder.address) || [])
@@ -425,7 +567,7 @@ function App() {
     }
   };
 
-  const handleAssetChange = async (event: any) => {
+  const handleAssetChange = async (event: SelectChangeEvent) => {
     const newAssetId = event.target.value;
     setSelectedAsset(newAssetId);
     setLoading(true);
