@@ -90,7 +90,8 @@ const SearchBox = styled(Box)(({ theme }) => ({
 
 interface TokenHolder {
   address: string;
-  quantity: number;
+  quantity: string;
+  relatedAddresses?: string[];
 }
 
 interface Asset {
@@ -99,8 +100,15 @@ interface Asset {
   metadata?: {
     name?: string;
     ticker?: string;
+    decimals?: number;
   };
   fingerprint?: string;
+  policy_id?: string;
+}
+
+interface TokenMetadata {
+  decimals: number;
+  symbol: string;
 }
 
 interface HolderData {
@@ -123,6 +131,51 @@ function App() {
   const [assets, setAssets] = useState<Asset[]>([]);
   const [selectedAsset, setSelectedAsset] = useState('');
   const [totalSupply, setTotalSupply] = useState<number>(0);
+
+  const formatTokenAmount = (amount: string, decimals: number = 0): string => {
+    const rawAmount = BigInt(amount);
+    if (decimals === 0) return rawAmount.toString();
+    
+    const divisor = BigInt(10 ** decimals);
+    const integerPart = rawAmount / divisor;
+    const fractionalPart = rawAmount % divisor;
+    
+    let formattedFraction = fractionalPart.toString().padStart(decimals, '0');
+    // Remove trailing zeros
+    while (formattedFraction.endsWith('0') && formattedFraction.length > 1) {
+      formattedFraction = formattedFraction.slice(0, -1);
+    }
+    
+    return formattedFraction === '0' 
+      ? integerPart.toString()
+      : `${integerPart}.${formattedFraction}`;
+  };
+
+  const fetchAssetDetails = async (assetId: string, apiKey: string): Promise<TokenMetadata> => {
+    try {
+      const response = await fetch(
+        `https://cardano-mainnet.blockfrost.io/api/v0/assets/${assetId}`,
+        {
+          headers: {
+            'project_id': apiKey,
+          },
+        }
+      );
+
+      if (!response.ok) {
+        throw new Error(`Failed to fetch asset details: ${response.status}`);
+      }
+
+      const data = await response.json();
+      return {
+        decimals: data.metadata?.decimals || 0,
+        symbol: data.metadata?.ticker || data.metadata?.name || 'Unknown'
+      };
+    } catch (error) {
+      console.error('Error fetching asset details:', error);
+      return { decimals: 0, symbol: 'Unknown' };
+    }
+  };
 
   const fetchAssetsForPolicy = async (policyId: string, apiKey: string): Promise<Asset[]> => {
     let allAssets: Asset[] = [];
@@ -163,8 +216,9 @@ function App() {
     let allHolders: any[] = [];
     let page = 1;
     const count = 100;
+    const maxHolders = 150; // Limit to top 150 holders
 
-    while (true) {
+    while (allHolders.length < maxHolders) {
       const response = await fetch(
         `https://cardano-mainnet.blockfrost.io/api/v0/assets/${assetId}/addresses?page=${page}&count=${count}&order=desc`,
         {
@@ -185,13 +239,105 @@ function App() {
       }
 
       allHolders = [...allHolders, ...holders];
-      if (holders.length < count) {
+      if (holders.length < count || allHolders.length >= maxHolders) {
         break;
       }
       page++;
     }
 
-    return allHolders;
+    // Only return top 150 holders
+    return allHolders.slice(0, maxHolders);
+  };
+
+  const findRelatedWallets = async (holders: TokenHolder[], apiKey: string): Promise<TokenHolder[]> => {
+    const relatedWallets = new Map<string, Set<string>>();
+
+    // For each holder, check their transaction history to find related wallets
+    for (const holder of holders) {
+      try {
+        const response = await fetch(
+          `https://cardano-mainnet.blockfrost.io/api/v0/addresses/${holder.address}/transactions?order=desc&count=50`,
+          {
+            headers: {
+              'project_id': apiKey,
+            },
+          }
+        );
+
+        if (!response.ok) continue;
+
+        const transactions = await response.json();
+        const relatedAddresses = new Set<string>();
+
+        // For each transaction, check other addresses involved
+        for (const tx of transactions) {
+          const txResponse = await fetch(
+            `https://cardano-mainnet.blockfrost.io/api/v0/txs/${tx.tx_hash}/utxos`,
+            {
+              headers: {
+                'project_id': apiKey,
+              },
+            }
+          );
+
+          if (!txResponse.ok) continue;
+
+          const txDetails = await txResponse.json();
+          
+          // Add addresses that frequently interact with this wallet
+          [...txDetails.inputs, ...txDetails.outputs]
+            .map(io => io.address)
+            .filter(address => 
+              address !== holder.address && 
+              holders.some(h => h.address === address)
+            )
+            .forEach(address => relatedAddresses.add(address));
+        }
+
+        relatedWallets.set(holder.address, relatedAddresses);
+      } catch (error) {
+        console.error('Error finding related wallets:', error);
+      }
+    }
+
+    // Add related addresses to holders
+    return holders.map(holder => ({
+      ...holder,
+      relatedAddresses: Array.from(relatedWallets.get(holder.address) || [])
+    }));
+  };
+
+  const fetchHolders = async (assetId: string) => {
+    try {
+      const apiKey = window._env_?.REACT_APP_BLOCKFROST_API_KEY || '';
+      
+      // Get asset details first
+      const assetDetails = await fetchAssetDetails(assetId, apiKey);
+      const holders = await fetchHoldersForAsset(assetId, apiKey);
+      
+      if (!Array.isArray(holders) || holders.length === 0) {
+        throw new Error('No holders found for this asset');
+      }
+
+      let totalSupply = 0;
+      const formattedHolders = holders.map(holder => {
+        const quantity = parseInt(holder.quantity, 10);
+        totalSupply += quantity;
+        return {
+          address: holder.address,
+          quantity: formatTokenAmount(holder.quantity, assetDetails.decimals)
+        };
+      });
+
+      // Find related wallets
+      const holdersWithRelations = await findRelatedWallets(formattedHolders, apiKey);
+
+      setTotalSupply(parseFloat(formatTokenAmount(totalSupply.toString(), assetDetails.decimals)));
+      setHolders(holdersWithRelations);
+    } catch (err) {
+      console.error('Error:', err);
+      setError(err instanceof Error ? err.message : 'Error fetching holders');
+    }
   };
 
   const fetchAssets = async () => {
@@ -246,6 +392,10 @@ function App() {
     try {
       const holdersMap: HolderData = {};
       let supply = 0;
+      
+      // Get the first asset's details to determine decimals
+      const assetDetails = await fetchAssetDetails(assets[0].asset, apiKey);
+      const decimals = assetDetails.decimals;
 
       // Fetch holders for each asset
       for (const asset of assets) {
@@ -263,46 +413,15 @@ function App() {
       const combinedHolders = Object.entries(holdersMap)
         .map(([address, quantity]) => ({
           address,
-          quantity
+          quantity: formatTokenAmount(quantity.toString(), decimals)
         }))
-        .sort((a, b) => b.quantity - a.quantity);
+        .sort((a, b) => parseFloat(b.quantity) - parseFloat(a.quantity));
 
-      setTotalSupply(supply);
+      setTotalSupply(parseFloat(formatTokenAmount(supply.toString(), decimals)));
       setHolders(combinedHolders);
     } catch (err) {
       console.error('Error aggregating holders:', err);
       throw err;
-    }
-  };
-
-  const fetchHolders = async (assetId: string) => {
-    try {
-      const apiKey = window._env_?.REACT_APP_BLOCKFROST_API_KEY || '';
-      console.log('Fetching holders for asset:', assetId);
-      
-      const holders = await fetchHoldersForAsset(assetId, apiKey);
-      
-      if (!Array.isArray(holders) || holders.length === 0) {
-        throw new Error('No holders found for this asset');
-      }
-
-      console.log('Found holders:', holders.length);
-      
-      const formattedHolders = holders
-        .map((holder: any) => ({
-          address: holder.address,
-          quantity: parseInt(holder.quantity, 10)
-        }))
-        .sort((a, b) => b.quantity - a.quantity);
-
-      const totalSupply = formattedHolders.reduce((sum, holder) => sum + holder.quantity, 0);
-      setTotalSupply(totalSupply);
-      setHolders(formattedHolders);
-    } catch (err) {
-      console.error('Error:', err);
-      setError(err instanceof Error ? err.message : 'Error fetching token holders');
-    } finally {
-      setLoading(false);
     }
   };
 
@@ -404,7 +523,10 @@ function App() {
             padding: 2,
             boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.5)',
           }}>
-            <BubbleMap holders={holders} />
+            <BubbleMap 
+              holders={holders} 
+              totalSupply={holders.reduce((sum, holder) => sum + parseFloat(holder.quantity), 0)}
+            />
           </Box>
         )}
       </StyledContainer>

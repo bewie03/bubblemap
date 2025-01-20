@@ -3,199 +3,252 @@ import * as d3 from 'd3';
 
 interface TokenHolder {
   address: string;
-  quantity: number;
+  quantity: string;
+  relatedAddresses?: string[];
 }
 
 interface BubbleMapProps {
   holders: TokenHolder[];
+  totalSupply: number;
 }
 
-type HierarchyDatum = d3.HierarchyNode<TokenHolder> & {
+type BubbleData = {
+  id: string;
+  name: string;
   value: number;
-  x: number;
-  y: number;
-  r: number;
+  displayValue: string;
+  relatedIds?: string[];
 };
 
-const BubbleMap: React.FC<BubbleMapProps> = ({ holders }) => {
+type SimulationNode = d3.SimulationNodeDatum & BubbleData;
+type SimulationLink = d3.SimulationLinkDatum<SimulationNode>;
+
+const BubbleMap: React.FC<BubbleMapProps> = ({ holders, totalSupply }) => {
   const svgRef = useRef<SVGSVGElement>(null);
+  const tooltipRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     if (!holders.length || !svgRef.current) return;
 
+    // Convert holders to nodes for force simulation
+    const nodes: SimulationNode[] = holders.map(holder => ({
+      id: holder.address,
+      name: holder.address,
+      value: parseFloat(holder.quantity),
+      displayValue: holder.quantity,
+      relatedIds: holder.relatedAddresses,
+    }));
+
+    // Create links between related nodes
+    const links: SimulationLink[] = [];
+    nodes.forEach(node => {
+      if (node.relatedIds) {
+        node.relatedIds.forEach(targetId => {
+          if (nodes.some(n => n.id === targetId)) {
+            links.push({
+              source: node.id,
+              target: targetId
+            });
+          }
+        });
+      }
+    });
+
     // Clear previous visualization
-    d3.select(svgRef.current).selectAll('*').remove();
+    const svg = d3.select(svgRef.current);
+    svg.selectAll("*").remove();
 
-    // Setup dimensions
-    const width = svgRef.current.clientWidth;
-    const height = svgRef.current.clientHeight;
-    const margin = { top: 40, right: 40, bottom: 40, left: 40 };
-    const innerWidth = width - margin.left - margin.right;
-    const innerHeight = height - margin.top - margin.bottom;
+    const width = svgRef.current.clientWidth || 800;
+    const height = svgRef.current.clientHeight || 800;
 
-    // Create SVG with zoom support
-    const svg = d3.select(svgRef.current)
-      .attr('width', width)
-      .attr('height', height);
+    // Create force simulation
+    const simulation = d3.forceSimulation<SimulationNode>(nodes)
+      .force("charge", d3.forceManyBody().strength(-200))
+      .force("center", d3.forceCenter(width / 2, height / 2))
+      .force("collision", d3.forceCollide().radius(d => {
+        const bubbleNode = d as SimulationNode;
+        return Math.sqrt(bubbleNode.value) * 2;
+      }))
+      .force("link", d3.forceLink<SimulationNode, SimulationLink>(links)
+        .id(d => d.id)
+        .distance(100)
+      );
 
-    // Create color scale
-    const maxQuantity = d3.max(holders, d => d.quantity) || 0;
-    const colorScale = d3.scaleSequential()
-      .domain([0, maxQuantity])
-      .interpolator(d3.interpolateRgb('#1E40AF', '#60A5FA'));
+    const g = svg.append("g");
 
-    // Create zoom behavior
+    // Add zoom behavior
     const zoom = d3.zoom()
-      .scaleExtent([0.5, 5])
-      .on('zoom', (event) => {
-        container.attr('transform', event.transform);
+      .scaleExtent([0.1, 4])
+      .on("zoom", (event) => {
+        g.attr("transform", event.transform);
       });
 
     svg.call(zoom as any);
 
-    // Create container for bubbles
-    const container = svg.append('g')
-      .attr('transform', `translate(${margin.left},${margin.top})`);
+    // Create color scales
+    const nodeColor = d3.scaleSequential()
+      .domain([0, d3.max(nodes, d => d.value) || 1])
+      .interpolator(d3.interpolateRgb('#1E40AF', '#60A5FA'));
 
-    // Create bubble layout
-    const bubble = d3.pack<TokenHolder>()
-      .size([innerWidth, innerHeight])
-      .padding(3);
+    // Add links first so they appear behind nodes
+    const links_g = g.append("g")
+      .attr("class", "links")
+      .selectAll("line")
+      .data(links)
+      .enter()
+      .append("line")
+      .attr("stroke", "#2C5282")
+      .attr("stroke-opacity", 0.2)
+      .attr("stroke-width", 1);
 
-    // Process data for bubble layout
-    const hierarchyRoot = d3.hierarchy<{ children: TokenHolder[] }>({ children: holders })
-      .sum(d => {
-        const node = d as unknown as TokenHolder;
-        return node.quantity || 0;
-      })
-      .sort((a, b) => (b.value || 0) - (a.value || 0));
-
-    // Create bubble nodes
-    const nodes = bubble(hierarchyRoot as unknown as d3.HierarchyNode<TokenHolder>)
-      .descendants()
-      .slice(1) as HierarchyDatum[];
-
-    // Create group elements for each bubble
-    const bubbles = container.selectAll('.bubble')
+    // Add nodes
+    const node_g = g.append("g")
+      .attr("class", "nodes")
+      .selectAll("g")
       .data(nodes)
       .enter()
-      .append('g')
-      .attr('class', 'bubble')
-      .attr('transform', d => `translate(${d.x},${d.y})`);
+      .append("g");
 
-    // Create circles with gradient fill
-    bubbles.append('circle')
-      .attr('r', d => d.r)
-      .style('fill', d => colorScale(d.data.quantity))
-      .style('opacity', 0.7)
-      .style('transition', 'all 0.3s ease')
-      .style('stroke', '#2D3748')
-      .style('stroke-width', 1)
-      .on('mouseover', function(event, d) {
-        d3.select(this)
-          .style('opacity', 1)
-          .style('stroke', '#60A5FA')
-          .style('stroke-width', 2);
+    // Add circles
+    const circles = node_g.append("circle")
+      .attr("r", d => Math.sqrt(d.value) * 2)
+      .style("fill", d => nodeColor(d.value))
+      .style("opacity", "0.7")
+      .style("stroke", "white")
+      .style("stroke-width", "2")
+      .call(d3.drag<any, SimulationNode>()
+        .on("start", dragstarted)
+        .on("drag", dragged)
+        .on("end", dragended)
+      );
 
-        // Show tooltip
-        const tooltip = d3.select('#tooltip');
-        const percentage = ((d.data.quantity / maxQuantity) * 100).toFixed(2);
-        const formattedQuantity = d.data.quantity.toLocaleString();
-        tooltip.style('opacity', 1)
-          .html(`
-            <div style="background: rgba(17, 24, 39, 0.95); border: 1px solid #374151; padding: 16px; border-radius: 8px;">
-              <div style="color: #60A5FA; font-weight: bold; margin-bottom: 8px;">Wallet Address</div>
-              <div style="color: #E5E7EB; font-family: monospace; margin-bottom: 12px; word-break: break-all; font-size: 12px;">
-                ${d.data.address}
-              </div>
-              <div style="color: #60A5FA; font-weight: bold; margin-bottom: 8px;">Token Amount</div>
-              <div style="color: #E5E7EB; font-family: monospace; margin-bottom: 8px;">
-                ${formattedQuantity}
-              </div>
-              <div style="color: #9CA3AF; font-size: 12px;">
-                ${percentage}% of largest holder
-              </div>
+    // Add labels
+    const labels = node_g.append("text")
+      .attr("dy", ".3em")
+      .style("text-anchor", "middle")
+      .style("fill", "white")
+      .style("font-size", d => Math.min(Math.sqrt(d.value), 14))
+      .text(d => d.displayValue);
+
+    // Add tooltips
+    node_g.on("mouseover", function(event, d: SimulationNode) {
+      const percentage = ((d.value / totalSupply) * 100).toFixed(2);
+      
+      // Highlight related nodes
+      circles.style("opacity", 0.1);
+      labels.style("opacity", 0.1);
+      links_g.style("opacity", 0.1);
+
+      const relatedNodes = new Set([d.id, ...(d.relatedIds || [])]);
+      circles.filter(n => relatedNodes.has(n.id))
+        .style("opacity", 0.9)
+        .style("stroke", "#60A5FA")
+        .style("stroke-width", "3");
+      
+      labels.filter(n => relatedNodes.has(n.id))
+        .style("opacity", 1);
+      
+      links_g.filter(l => 
+        relatedNodes.has((l.source as SimulationNode).id) && 
+        relatedNodes.has((l.target as SimulationNode).id)
+      )
+        .style("opacity", 1)
+        .style("stroke", "#60A5FA")
+        .style("stroke-width", "2");
+
+      if (tooltipRef.current) {
+        tooltipRef.current.style.visibility = "visible";
+        tooltipRef.current.style.left = `${event.pageX + 10}px`;
+        tooltipRef.current.style.top = `${event.pageY - 10}px`;
+        tooltipRef.current.innerHTML = `
+          <div style="background: rgba(0, 0, 0, 0.8); padding: 10px; border-radius: 4px;">
+            <div style="color: #64B5F6; margin-bottom: 5px;">Wallet Address</div>
+            <div style="color: white; word-break: break-all; margin-bottom: 10px; font-size: 12px;">
+              ${d.name}
             </div>
-          `)
-          .style('left', (event.pageX + 10) + 'px')
-          .style('top', (event.pageY - 10) + 'px');
-      })
-      .on('mouseout', function() {
-        d3.select(this)
-          .style('opacity', 0.7)
-          .style('stroke', '#2D3748')
-          .style('stroke-width', 1);
-        
-        d3.select('#tooltip').style('opacity', 0);
-      });
+            <div style="color: #64B5F6; margin-bottom: 5px;">Token Amount</div>
+            <div style="color: white; font-size: 14px;">
+              ${d.displayValue}
+            </div>
+            <div style="color: #64B5F6; margin-top: 5px;">Percentage</div>
+            <div style="color: white; font-size: 14px;">
+              ${percentage}% of total supply
+            </div>
+            ${d.relatedIds?.length ? `
+              <div style="color: #64B5F6; margin-top: 5px;">Related Wallets</div>
+              <div style="color: white; font-size: 12px;">
+                ${d.relatedIds.length} connected addresses
+              </div>
+            ` : ''}
+          </div>
+        `;
+      }
+    })
+    .on("mouseout", function() {
+      // Reset styles
+      circles.style("opacity", 0.7)
+        .style("stroke", "white")
+        .style("stroke-width", "2");
+      labels.style("opacity", 1);
+      links_g.style("stroke", "#2C5282")
+        .style("opacity", 0.2)
+        .style("stroke-width", 1);
 
-    // Add labels for larger bubbles
-    bubbles.filter(d => d.r > 30)
-      .append('text')
-      .attr('text-anchor', 'middle')
-      .attr('dy', '0.3em')
-      .style('font-size', d => Math.min(d.r / 3, 14) + 'px')
-      .style('fill', '#E5E7EB')
-      .style('pointer-events', 'none')
-      .text(d => {
-        const amount = d.data.quantity;
-        if (amount >= 1e6) return (amount / 1e6).toFixed(1) + 'M';
-        if (amount >= 1e3) return (amount / 1e3).toFixed(1) + 'K';
-        return amount.toString();
-      });
+      if (tooltipRef.current) {
+        tooltipRef.current.style.visibility = "hidden";
+      }
+    });
 
-    // Add legend
-    const legendData = [0.25, 0.5, 0.75, 1].map(p => maxQuantity * p);
-    const legend = svg.append('g')
-      .attr('class', 'legend')
-      .attr('transform', `translate(${width - 150}, 20)`);
-
-    const legendItems = legend.selectAll('.legend-item')
-      .data(legendData)
-      .enter()
-      .append('g')
-      .attr('class', 'legend-item')
-      .attr('transform', (d, i) => `translate(0, ${i * 25})`);
-
-    legendItems.append('circle')
-      .attr('r', 6)
-      .style('fill', d => colorScale(d))
-      .style('opacity', 0.7)
-      .style('stroke', '#2D3748')
-      .style('stroke-width', 1);
-
-    legendItems.append('text')
-      .attr('x', 15)
-      .attr('y', 5)
-      .style('font-size', '12px')
-      .style('fill', '#9CA3AF')
-      .text(d => {
-        if (d >= 1e6) return (d / 1e6).toFixed(1) + 'M';
-        if (d >= 1e3) return (d / 1e3).toFixed(1) + 'K';
-        return d.toString();
-      });
-
-    // Add tooltip div if it doesn't exist
-    if (!document.getElementById('tooltip')) {
-      d3.select('body').append('div')
-        .attr('id', 'tooltip')
-        .style('position', 'absolute')
-        .style('pointer-events', 'none')
-        .style('opacity', 0)
-        .style('z-index', '1000');
+    // Create tooltip div if it doesn't exist
+    if (!tooltipRef.current) {
+      const tooltip = document.createElement('div');
+      tooltip.style.position = 'absolute';
+      tooltip.style.pointerEvents = 'none';
+      tooltip.style.visibility = 'hidden';
+      tooltip.style.zIndex = '1000';
+      document.body.appendChild(tooltip);
+      tooltipRef.current = tooltip;
     }
 
-  }, [holders]);
+    // Update force simulation
+    simulation.on("tick", () => {
+      links_g
+        .attr("x1", d => (d.source as SimulationNode).x || 0)
+        .attr("y1", d => (d.source as SimulationNode).y || 0)
+        .attr("x2", d => (d.target as SimulationNode).x || 0)
+        .attr("y2", d => (d.target as SimulationNode).y || 0);
+
+      node_g
+        .attr("transform", d => `translate(${d.x},${d.y})`);
+    });
+
+    // Drag functions
+    function dragstarted(event: any, d: SimulationNode) {
+      if (!event.active) simulation.alphaTarget(0.3).restart();
+      d.fx = d.x;
+      d.fy = d.y;
+    }
+
+    function dragged(event: any, d: SimulationNode) {
+      d.fx = event.x;
+      d.fy = event.y;
+    }
+
+    function dragended(event: any, d: SimulationNode) {
+      if (!event.active) simulation.alphaTarget(0);
+      d.fx = null;
+      d.fy = null;
+    }
+
+  }, [holders, totalSupply]);
 
   return (
     <svg 
       ref={svgRef}
       style={{
         width: '100%',
-        height: '100%',
-        borderRadius: '8px',
-        background: 'linear-gradient(135deg, #1A1D23 0%, #14171A 100%)',
-        boxShadow: '0 4px 6px rgba(0,0,0,0.1)',
+        height: '800px',
+        background: '#0A0B0D'
       }}
     />
   );
