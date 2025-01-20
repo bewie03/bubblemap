@@ -8,6 +8,14 @@ interface TokenHolder {
   quantity: number;
 }
 
+declare global {
+  interface Window {
+    _env_: {
+      BLOCKFROST_API_KEY: string;
+    }
+  }
+}
+
 function App() {
   const [policyId, setPolicyId] = useState('');
   const [holders, setHolders] = useState<TokenHolder[]>([]);
@@ -18,29 +26,76 @@ function App() {
     setLoading(true);
     setError('');
     try {
-      const response = await fetch(
-        `https://cardano-mainnet.blockfrost.io/api/v0/assets/policy/${policyId}/addresses`,
+      // Get all assets under this policy
+      const assetsResponse = await fetch(
+        `https://cardano-mainnet.blockfrost.io/api/v0/assets/policy/${policyId}`,
         {
           headers: {
-            'project_id': process.env.REACT_APP_BLOCKFROST_API_KEY || '',
+            'project_id': window._env_?.BLOCKFROST_API_KEY || '',
           },
         }
       );
 
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
+      if (!assetsResponse.ok) {
+        if (assetsResponse.status === 404) {
+          throw new Error('No assets found for this policy ID. Please check if the policy ID is correct.');
+        }
+        if (assetsResponse.status === 403) {
+          throw new Error('API key error. Please check your Blockfrost API key.');
+        }
+        throw new Error(`API error: ${assetsResponse.status}`);
       }
 
-      const data = await response.json();
-      const formattedHolders = data.map((holder: any) => ({
+      const assets = await assetsResponse.json();
+      
+      if (!Array.isArray(assets) || assets.length === 0) {
+        throw new Error('No assets found for this policy ID');
+      }
+
+      // Get holders for the first asset in the policy
+      const assetId = assets[0].asset;
+      console.log('Fetching holders for asset:', assetId);
+      
+      const holdersResponse = await fetch(
+        `https://cardano-mainnet.blockfrost.io/api/v0/assets/${assetId}/addresses`,
+        {
+          headers: {
+            'project_id': window._env_?.BLOCKFROST_API_KEY || '',
+          },
+        }
+      );
+
+      if (!holdersResponse.ok) {
+        if (holdersResponse.status === 404) {
+          throw new Error('No holder information found for this asset.');
+        }
+        if (holdersResponse.status === 403) {
+          throw new Error('API key error. Please check your Blockfrost API key.');
+        }
+        throw new Error(`API error: ${holdersResponse.status}`);
+      }
+
+      const holders = await holdersResponse.json();
+      
+      if (!Array.isArray(holders) || holders.length === 0) {
+        throw new Error('No holders found for this asset');
+      }
+
+      console.log('Found holders:', holders.length);
+      
+      const formattedHolders = holders.map((holder: any) => ({
         address: holder.address,
         quantity: parseInt(holder.quantity, 10)
       }));
 
       setHolders(formattedHolders);
     } catch (err) {
-      setError('Error fetching token holders. Please check the policy ID and try again.');
-      console.error(err);
+      console.error('Error:', err);
+      if (err instanceof Error) {
+        setError(err.message);
+      } else {
+        setError('Error fetching token holders. Please check the policy ID and try again.');
+      }
     } finally {
       setLoading(false);
     }
@@ -60,6 +115,8 @@ function App() {
             value={policyId}
             onChange={(e) => setPolicyId(e.target.value)}
             sx={{ width: '400px' }}
+            placeholder="e.g., d5e6bf0500378d4f0da4e8dde6becec7621cd8cbf5cbb9b87013d4cc"
+            helperText="Enter a Cardano token policy ID to visualize holder distribution"
           />
           <Button
             variant="contained"

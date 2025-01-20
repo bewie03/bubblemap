@@ -10,10 +10,6 @@ interface BubbleMapProps {
   holders: TokenHolder[];
 }
 
-interface HierarchyData {
-  children: TokenHolder[];
-}
-
 type HierarchyDatum = d3.HierarchyNode<TokenHolder> & {
   value: number;
   x: number;
@@ -33,19 +29,43 @@ const BubbleMap: React.FC<BubbleMapProps> = ({ holders }) => {
     // Setup dimensions
     const width = svgRef.current.clientWidth;
     const height = svgRef.current.clientHeight;
+    const margin = { top: 20, right: 20, bottom: 20, left: 20 };
+    const innerWidth = width - margin.left - margin.right;
+    const innerHeight = height - margin.top - margin.bottom;
 
     // Create SVG
     const svg = d3.select(svgRef.current)
       .attr('width', width)
       .attr('height', height);
 
+    // Add gradient definitions
+    const defs = svg.append('defs');
+    const gradient = defs.append('linearGradient')
+      .attr('id', 'bubble-gradient')
+      .attr('x1', '0%')
+      .attr('y1', '0%')
+      .attr('x2', '100%')
+      .attr('y2', '100%');
+
+    gradient.append('stop')
+      .attr('offset', '0%')
+      .attr('stop-color', '#FF6B6B');
+
+    gradient.append('stop')
+      .attr('offset', '50%')
+      .attr('stop-color', '#4ECDC4');
+
+    gradient.append('stop')
+      .attr('offset', '100%')
+      .attr('stop-color', '#45B7D1');
+
     // Create bubble layout
     const bubble = d3.pack<TokenHolder>()
-      .size([width, height])
-      .padding(1);
+      .size([innerWidth, innerHeight])
+      .padding(3);
 
     // Process data for bubble layout
-    const hierarchyRoot = d3.hierarchy<HierarchyData>({ children: holders })
+    const hierarchyRoot = d3.hierarchy<{ children: TokenHolder[] }>({ children: holders })
       .sum(d => {
         const node = d as unknown as TokenHolder;
         return node.quantity || 0;
@@ -57,8 +77,12 @@ const BubbleMap: React.FC<BubbleMapProps> = ({ holders }) => {
       .descendants()
       .slice(1) as HierarchyDatum[]; // slice(1) removes the root node
 
+    // Create container for bubbles
+    const container = svg.append('g')
+      .attr('transform', `translate(${margin.left},${margin.top})`);
+
     // Create group elements for each bubble
-    const bubbles = svg.selectAll('.bubble')
+    const bubbles = container.selectAll('.bubble')
       .data(nodes)
       .enter()
       .append('g')
@@ -68,8 +92,9 @@ const BubbleMap: React.FC<BubbleMapProps> = ({ holders }) => {
     // Create circles
     bubbles.append('circle')
       .attr('r', d => d.r)
-      .style('fill', (_, i) => d3.interpolateViridis(i / nodes.length))
+      .style('fill', 'url(#bubble-gradient)')
       .style('opacity', 0.7)
+      .style('transition', 'all 0.3s ease')
       .on('mouseover', function(event, d) {
         d3.select(this)
           .style('opacity', 1)
@@ -78,11 +103,13 @@ const BubbleMap: React.FC<BubbleMapProps> = ({ holders }) => {
 
         // Show tooltip
         const tooltip = d3.select('#tooltip');
+        const formattedQuantity = d.data.quantity.toLocaleString();
         tooltip.style('opacity', 1)
           .html(`
-            Address: ${d.data.address.slice(0, 10)}...
-            <br/>
-            Quantity: ${d.data.quantity.toLocaleString()}
+            <div style="font-weight: bold; margin-bottom: 5px;">Wallet Address:</div>
+            <div style="font-family: monospace; margin-bottom: 10px;">${d.data.address.slice(0, 15)}...</div>
+            <div style="font-weight: bold; margin-bottom: 5px;">Token Amount:</div>
+            <div style="font-family: monospace;">${formattedQuantity}</div>
           `)
           .style('left', (event.pageX + 10) + 'px')
           .style('top', (event.pageY - 10) + 'px');
@@ -101,13 +128,16 @@ const BubbleMap: React.FC<BubbleMapProps> = ({ holders }) => {
       d3.select('body').append('div')
         .attr('id', 'tooltip')
         .style('position', 'absolute')
-        .style('background', 'rgba(0, 0, 0, 0.8)')
+        .style('background', 'rgba(33, 33, 33, 0.9)')
         .style('color', 'white')
-        .style('padding', '8px')
-        .style('border-radius', '4px')
-        .style('font-size', '12px')
+        .style('padding', '12px')
+        .style('border-radius', '6px')
+        .style('font-size', '14px')
         .style('pointer-events', 'none')
-        .style('opacity', 0);
+        .style('opacity', 0)
+        .style('box-shadow', '0 2px 4px rgba(0,0,0,0.2)')
+        .style('max-width', '300px')
+        .style('word-wrap', 'break-word');
     }
 
   }, [holders]);
@@ -118,8 +148,9 @@ const BubbleMap: React.FC<BubbleMapProps> = ({ holders }) => {
       style={{
         width: '100%',
         height: '100%',
-        background: '#f5f5f5',
-        borderRadius: '8px'
+        background: 'linear-gradient(135deg, #f5f7fa 0%, #e8ecf2 100%)',
+        borderRadius: '12px',
+        boxShadow: '0 4px 6px rgba(0,0,0,0.1)',
       }}
     />
   );
